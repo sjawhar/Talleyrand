@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/oauth/google", tags=["oauth_google"])
 
+NOT_CONFIGURED_DETAIL = "Google sign-in is not configured on this instance."
+
 OAUTH_STATE_COOKIE = "oauth_state"
 OAUTH_STATE_MAX_AGE = OAUTH_STATE_EXPIRE_MINUTES * 60
 
@@ -43,6 +45,8 @@ async def callback(
     Exchanges authorization code for access token and stores it in cookies.
     Validates state from cookie to prevent CSRF and login CSRF attacks.
     """
+    if not settings.google_sign_in_configured:
+        raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL)
     # Handle user cancellation or Google error
     if callback_data.error:
         error_messages = {
@@ -109,6 +113,8 @@ async def redirect_url(
     Sets oauth_state cookie (first-party on backend domain) for CSRF protection,
     then redirects the browser directly to Google's consent page.
     """
+    if not settings.google_sign_in_configured:
+        raise HTTPException(status_code=503, detail=NOT_CONFIGURED_DETAIL)
     try:
         result = service.create_auth_url(data.next_url)
     except ValueError as exc:

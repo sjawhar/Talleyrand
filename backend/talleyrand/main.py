@@ -7,10 +7,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from talleyrand.core.config import settings
 from talleyrand.core.llm import StructuredGenerationError
+from talleyrand.features.app_config.router import router as app_config_router
 from talleyrand.features.auth_jwt.router import router as auth_jwt_router
 from talleyrand.features.demo_cases.seed import seed_demo_cases
 from talleyrand.features.graph.router import router as graph_router
@@ -67,6 +69,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Local mode signs in anyone who can reach the server, so it must answer only
+# requests addressed to this machine: a page on another name that re-resolves to
+# 127.0.0.1 (DNS rebinding) is same-origin with that name and could otherwise
+# sign in and read every case. Its requests carry the foreign name in Host.
+# The host check ignores the port. Outermost, so nothing else runs first.
+if settings.local_user_email is not None:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+
 
 # A failed structured LLM call is the caller's provider problem (bad key,
 # quota, refusal), not a server bug: answer with the provider's message as a
@@ -81,6 +91,7 @@ async def structured_generation_error_handler(
 app.include_router(oauth_google_router)
 app.include_router(graph_router)
 app.include_router(auth_jwt_router)
+app.include_router(app_config_router)
 app.include_router(share_router)
 app.include_router(research_router)
 app.include_router(transcription_router)

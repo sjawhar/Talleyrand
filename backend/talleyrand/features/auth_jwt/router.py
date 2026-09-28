@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+from talleyrand.core.config import settings
 from talleyrand.features.auth_jwt import service
 from talleyrand.models.user import User
 
@@ -59,6 +60,26 @@ async def refresh_access_token(request: RefreshRequest):
     new_refresh_token = service.create_refresh_token(user)
 
     return TokenResponse(access_token=new_access_token, refresh_token=new_refresh_token)
+
+
+@router.post("/local-login", response_model=TokenResponse)
+async def local_login():
+    """
+    Issue tokens for the single configured local user, bypassing Google entirely.
+
+    Only available when the instance is running in single-user local mode
+    (LOCAL_USER_EMAIL is set); otherwise this route does not exist.
+    """
+    if settings.local_user_email is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    user = User(
+        id=settings.local_user_email,
+        email=settings.local_user_email,
+        name=settings.local_user_name,
+    )
+    access_token = service.create_access_token(user)
+    refresh_token = service.create_refresh_token(user)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
 async def require_auth(

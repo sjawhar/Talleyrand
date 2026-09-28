@@ -10,7 +10,8 @@ from typing import Annotated
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from talleyrand.features.graph.dependencies import get_openai_api_key
+from talleyrand.core.config import settings
+from talleyrand.features.graph.dependencies import get_background_api_key, get_openai_api_key
 
 
 def _build_app() -> FastAPI:
@@ -44,3 +45,61 @@ def test_blank_key_counts_as_missing():
     client = TestClient(_build_app())
     response = client.post("/generate", headers={"X-OpenAI-API-Key": ""})
     assert response.status_code == 400
+
+
+def _build_background_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.post("/generate")
+    async def generate(api_key: Annotated[str, Depends(get_background_api_key)]) -> dict:
+        return {"key": api_key}
+
+    return app
+
+
+def test_background_openai_key_is_passed_through(monkeypatch):
+    monkeypatch.setattr(settings, "background_provider", "openai")
+    client = TestClient(_build_background_app())
+    response = client.post("/generate", headers={"X-OpenAI-API-Key": "sk-test"})
+    assert response.status_code == 200
+    assert response.json() == {"key": "sk-test"}
+
+
+def test_background_openai_missing_key_is_a_400_naming_openai(monkeypatch):
+    monkeypatch.setattr(settings, "background_provider", "openai")
+    client = TestClient(_build_background_app())
+    response = client.post("/generate", headers={"X-Anthropic-API-Key": "sk-ant"})
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "OpenAI" in detail
+    assert "Settings" in detail
+
+
+def test_background_anthropic_key_is_passed_through(monkeypatch):
+    monkeypatch.setattr(settings, "background_provider", "anthropic")
+    client = TestClient(_build_background_app())
+    response = client.post("/generate", headers={"X-Anthropic-API-Key": "sk-ant"})
+    assert response.status_code == 200
+    assert response.json() == {"key": "sk-ant"}
+
+
+def test_background_anthropic_missing_key_without_server_credentials_is_a_400(monkeypatch):
+    monkeypatch.setattr(settings, "background_provider", "anthropic")
+    monkeypatch.setattr(settings, "anthropic_identity_token_command", None)
+    client = TestClient(_build_background_app())
+    response = client.post("/generate")
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "Anthropic" in detail
+    assert "Settings" in detail
+
+
+def test_background_anthropic_missing_key_with_server_credentials_returns_empty_string(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "background_provider", "anthropic")
+    monkeypatch.setattr(settings, "anthropic_identity_token_command", "echo test-jwt")
+    client = TestClient(_build_background_app())
+    response = client.post("/generate")
+    assert response.status_code == 200
+    assert response.json() == {"key": ""}

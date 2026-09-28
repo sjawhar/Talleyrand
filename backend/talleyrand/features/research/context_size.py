@@ -16,11 +16,12 @@ import logging
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from anthropic import APIError as AnthropicAPIError
+from anthropic import AnthropicError
 from fastapi import Depends, Header, HTTPException, status
 
 from talleyrand.core.llm import count_prompt_tokens
 from talleyrand.core.model_settings import get_model_config
+from talleyrand.core.server_credentials import server_provider_available
 from talleyrand.core.token_counter import count_tokens
 from talleyrand.features.auth_jwt import router as auth_app
 from talleyrand.features.graph.dtos import (
@@ -103,17 +104,22 @@ async def context_size(
     )
     window = model.window
 
-    # Anthropic's counter needs the key the answer would use; without it, or
-    # when the count fails, tiktoken stands in and the meter says so.
+    # Anthropic's counter needs the key the answer would use, or the server's
+    # own credentials; without either, or when the count fails, tiktoken
+    # stands in and the meter says so.
     api_key = x_anthropic_api_key if window.provider == "anthropic" else x_openai_api_key
-    estimated = window.provider == "anthropic" and not api_key
+    estimated = (
+        window.provider == "anthropic"
+        and not api_key
+        and not server_provider_available("anthropic")
+    )
     tokens: int | None = None
     if not estimated:
         try:
             tokens = await count_prompt_tokens(
                 window, api_key or "", RESEARCH_ANSWERER_INSTRUCTIONS, context.text
             )
-        except AnthropicAPIError as e:
+        except AnthropicError as e:
             logger.warning(
                 "Token count on %s failed, estimating with tiktoken: %s", window.api_model, e
             )

@@ -17,11 +17,10 @@ from pydantic import BaseModel
 from talleyrand.core.llm import parse_structured
 from talleyrand.core.prompts import TALLEYRAND_DESCRIPTION
 from talleyrand.features.graph.dtos import GraphNoId
+from talleyrand.features.research.background_models import background_model
 from talleyrand.features.research.context_builder import ancestors_of, build_question_tree
 from talleyrand.features.research.ref_tokens import outline_ref_tokens
 
-CHEAT_SHEET_MODEL = "gpt-6-astra"
-CHEAT_SHEET_REASONING_EFFORT = "medium"
 EMPTY_CHEAT_SHEET_ERROR = "The model returned an empty cheat sheet."
 
 INSTRUCTIONS = (
@@ -158,16 +157,17 @@ def build_cheat_sheet_user_content(graph: GraphNoId, node_id: str) -> str:
     return "\n".join(parts)
 
 
-async def generate_cheat_sheet(graph: GraphNoId, node_id: str, openai_api_key: str) -> str:
+async def generate_cheat_sheet(graph: GraphNoId, node_id: str, api_key: str) -> str:
     """Condense the thread above a question into its cheat sheet (Markdown)."""
+    chosen = background_model("cheat_sheet")
     parsed = await parse_structured(
         caller="research_cheat_sheet",
-        model=CHEAT_SHEET_MODEL,
-        api_key=openai_api_key,
+        model=chosen.window,
+        api_key=api_key,
         system_prompt=INSTRUCTIONS,
         user_content=build_cheat_sheet_user_content(graph, node_id),
         schema=CheatSheetSchema,
-        reasoning_effort=CHEAT_SHEET_REASONING_EFFORT,
+        reasoning_effort=chosen.reasoning_effort,
     )
     markdown = parsed.markdown.strip()
     if not markdown:

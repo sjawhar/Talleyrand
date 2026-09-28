@@ -9,10 +9,10 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from talleyrand.core.llm import parse_structured
-from talleyrand.core.model_settings import get_model_window
 from talleyrand.core.prompts import TALLEYRAND_DESCRIPTION
-from talleyrand.features.graph.dependencies import get_openai_api_key
+from talleyrand.features.graph.dependencies import get_background_api_key
 from talleyrand.features.graph.dtos import GraphNoId
+from talleyrand.features.research.background_models import background_model
 from talleyrand.features.research.context_builder import build_research_context
 from talleyrand.features.research.context_fitting import fit_research_context
 from talleyrand.features.research.dtos import (
@@ -22,8 +22,6 @@ from talleyrand.features.research.dtos import (
 )
 
 MAX_SUGGESTIONS = 3
-SUGGESTER_MODEL = get_model_window("gpt-6-astra")
-SUGGESTER_REASONING_EFFORT = "low"
 
 INSTRUCTIONS = (
     TALLEYRAND_DESCRIPTION
@@ -58,7 +56,7 @@ Propose up to {max_suggestions} follow-up questions. They must:
 - Serve the inferred intent: advance the user's goal, skip what they already know.
 - Be diverse: each suggestion must open a distinct direction. None may be a reformulation of a question already in the tree, a PENDING SUGGESTION, or a DECLINED QUESTION — a near-duplicate wastes its slot.
 - Be concise one-sentence questions, no yes/no questions, each answerable on its own.
-- Use the same language as the user's questions.
+- Be written in the language of the case: the language its BRIEF and the QUESTION lines of its CASE TREE are written in. Never switch to another language.
 
 Fewer than {max_suggestions} is fine if the answer doesn't support more genuinely distinct directions."""
 )
@@ -81,7 +79,7 @@ async def get_research_suggestions(
     graph: GraphNoId,
     node_id: UUID,
     request_more: bool,
-    openai_api_key: str,
+    api_key: str,
     selection: SelectionDTO | None = None,
 ) -> ResearchSuggestionSchema:
     """Generate follow-up question suggestions for a read answer."""
@@ -120,35 +118,36 @@ async def get_research_suggestions(
             f"{MAX_SUGGESTIONS} follow-up questions to file under it."
         )
 
+    chosen = background_model("suggestions")
     instructions = INSTRUCTIONS.format(max_suggestions=MAX_SUGGESTIONS)
     tail_sections = [*extra_sections, task]
     context = await fit_research_context(
         context,
-        model=SUGGESTER_MODEL,
-        api_key=openai_api_key,
+        model=chosen.window,
+        api_key=api_key,
         system_prompt=instructions,
         tail="\n\n" + "\n\n".join(tail_sections),
     )
     return await parse_structured(
         caller="research_suggestions",
-        model=SUGGESTER_MODEL.api_model,
-        api_key=openai_api_key,
+        model=chosen.window,
+        api_key=api_key,
         system_prompt=instructions,
         user_content="\n\n".join([context.text, *tail_sections]),
         schema=ResearchSuggestionSchema,
-        reasoning_effort=SUGGESTER_REASONING_EFFORT,
+        reasoning_effort=chosen.reasoning_effort,
     )
 
 
 async def suggest(
     node_id: UUID,
     payload: ResearchSuggestRequestDTO,
-    openai_api_key: Annotated[str, Depends(get_openai_api_key)],
+    api_key: Annotated[str, Depends(get_background_api_key)],
 ) -> ResearchSuggestResponseDTO:
     """Endpoint for transient question suggestions (selection popup, canvas)."""
     try:
         result = await get_research_suggestions(
-            payload.graph, node_id, False, openai_api_key, payload.selection
+            payload.graph, node_id, False, api_key, payload.selection
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

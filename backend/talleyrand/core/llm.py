@@ -5,22 +5,25 @@ stream_text dispatches streaming chat queries to OpenAI (Responses API) or
 Anthropic (Messages API) based on the selected model's provider; it is used by
 the node-query services. It yields the answer as TextChunks interleaved with
 the SourceChunks describing what its web searches turned up. parse_structured
-is the one-shot structured-output call (OpenAI-only) used by kickstart, the
-suggesters, reports, and auto-naming.
+is the one-shot structured-output call used by kickstart, the suggesters,
+reports, and auto-naming — OpenAI (Responses API) or Anthropic (Messages API),
+again by the selected model's provider.
 """
 
 import asyncio
 import logging
 from collections.abc import AsyncGenerator, AsyncIterable
 from dataclasses import dataclass
+from functools import cache
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
+from anthropic import AnthropicError, AsyncAnthropic, transform_schema
 from anthropic import APIError as AnthropicAPIError
-from anthropic import AsyncAnthropic
 from anthropic.types import (
     CitationsWebSearchResultLocation,
+    ContentBlock,
     MessageDeltaUsage,
     RawMessageStreamEvent,
     WebSearchToolResultBlock,
@@ -37,7 +40,7 @@ from openai.types.responses import (
     ResponseOutputRefusal,
     ResponseOutputText,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from talleyrand.core.llm_logging import log_response, log_structured_response
 from talleyrand.core.model_settings import (
@@ -45,6 +48,10 @@ from talleyrand.core.model_settings import (
     ModelConfig,
     ModelWindow,
     Provider,
+)
+from talleyrand.core.server_credentials import (
+    anthropic_server_credentials,
+    server_provider_available,
 )
 from talleyrand.core.token_counter import count_tokens
 
@@ -112,11 +119,49 @@ class MissingApiKeyError(Exception):
 
 
 def resolve_api_key(model: ModelConfig, openai_api_key: str, anthropic_api_key: str) -> str:
-    """Pick the API key matching the model's provider."""
+    """
+    Pick the API key matching the model's provider.
+
+    An empty Anthropic key is not an error when the server holds its own
+    credentials for the provider: anthropic_client falls back to them. There
+    is no server-held OpenAI credential, so an empty OpenAI key always raises.
+    """
     api_key = openai_api_key if model.provider == "openai" else anthropic_api_key
-    if not api_key:
+    if not api_key and not server_provider_available(model.provider):
         raise MissingApiKeyError(model.provider)
     return api_key
+
+
+@cache
+def server_anthropic_client() -> AsyncAnthropic | None:
+    """
+    The one client every keyless Anthropic call shares, or None when the server
+    holds no Anthropic credentials. The SDK caches the exchanged access token per
+    client (its TokenCache), so sharing the client is what lets one token exchange
+    serve every call until the token nears expiry.
+    """
+    credentials = anthropic_server_credentials()
+    if credentials is None:
+        return None
+    return AsyncAnthropic(credentials=credentials)
+
+
+def anthropic_client(api_key: str) -> AsyncAnthropic:
+    """
+    The Anthropic client an API call should use.
+
+    A given key wins outright; only its absence turns to the server's own
+    workload-identity credentials (server_anthropic_client), and only when
+    they are configured. There is no fallback from a failed or missing
+    credential to any other source — an unconfigured server raises here so the
+    caller's error surfaces instead of a request going out unauthenticated.
+    """
+    if api_key:
+        return AsyncAnthropic(api_key=api_key)
+    client = server_anthropic_client()
+    if client is None:
+        raise MissingApiKeyError("anthropic")
+    return client
 
 
 def provider_error_detail(exc: Exception) -> str | None:
@@ -153,7 +198,71 @@ class StructuredGenerationError(Exception):
     """
 
 
-async def parse_structured[SchemaT: BaseModel](
+# How many times a paused structured turn is resumed before the call gives up.
+# Anthropic pauses a server-tool loop (web search) that reaches its iteration
+# limit; each resumption buys another run of that loop.
+ANTHROPIC_PAUSE_CONTINUATIONS = 3
+
+
+def _anthropic_structured_output_budget(model: ModelWindow) -> int:
+    """
+    max_tokens for a structured call: the output room the window leaves after the
+    largest prompt fit_to_context lets through, within the model's own output cap.
+    Adaptive thinking spends from the same budget, so a report at "max" effort
+    needs all of it.
+    """
+    return min(model.max_output_tokens, model.context_tokens - model.max_input_tokens)
+
+
+def _anthropic_final_answer(content: list[ContentBlock]) -> str:
+    """
+    The text of the model's final answer: every text block after the last
+    server-tool block, joined. A web-searched answer arrives as several text
+    blocks — a preamble before the search, then the answer split wherever a
+    citation attaches — so no single block holds the whole JSON.
+    """
+    last_tool_block = max(
+        (
+            index
+            for index, block in enumerate(content)
+            if block.type == "server_tool_use" or block.type.endswith("_tool_result")
+        ),
+        default=-1,
+    )
+    return "".join(block.text for block in content[last_tool_block + 1 :] if block.type == "text")
+
+
+def _anthropic_content_blocks(user_content: str | list[dict]) -> str | list[dict]:
+    """
+    Responses-API content parts (input_text + input_file with a PDF data URI)
+    converted to the Messages API's text/document blocks, the same shapes
+    _stream_anthropic sends. A plain string passes through unchanged.
+    """
+    if isinstance(user_content, str):
+        return user_content
+    blocks: list[dict] = []
+    for part in user_content:
+        if part["type"] == "input_text":
+            blocks.append({"type": "text", "text": part["text"]})
+        elif part["type"] == "input_file":
+            blocks.append(
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        # Already has a data:application/pdf;base64, prefix — strip it.
+                        "data": part["file_data"].split(",", 1)[1],
+                    },
+                    "title": part["filename"],
+                }
+            )
+        else:
+            raise ValueError(f"Unsupported content part for Anthropic: {part['type']!r}")
+    return blocks
+
+
+async def _parse_structured_openai[SchemaT: BaseModel](
     *,
     caller: str,
     model: str,
@@ -161,17 +270,9 @@ async def parse_structured[SchemaT: BaseModel](
     system_prompt: str,
     user_content: str | list[dict],
     schema: type[SchemaT],
-    reasoning_effort: str | None = None,
-    web_search_enabled: bool = False,
+    reasoning_effort: str | None,
+    web_search_enabled: bool,
 ) -> SchemaT:
-    """
-    One-shot structured-output call, shared by every non-streaming feature.
-
-    Logs the prompt and the parsed response, and normalizes both failure modes
-    (provider error, output the schema could not be parsed from) to
-    StructuredGenerationError. user_content is either a plain string or
-    Responses-API content parts (input_text + input_file) when PDFs are attached.
-    """
     client = AsyncOpenAI(api_key=api_key)
     try:
         response = await client.responses.parse(
@@ -194,6 +295,138 @@ async def parse_structured[SchemaT: BaseModel](
 
     log_structured_response(caller, response.output_parsed)
     return response.output_parsed
+
+
+async def _parse_structured_anthropic[SchemaT: BaseModel](
+    *,
+    caller: str,
+    model: ModelWindow,
+    api_key: str,
+    system_prompt: str,
+    user_content: str | list[dict],
+    schema: type[SchemaT],
+    reasoning_effort: str | None,
+    web_search_enabled: bool,
+) -> SchemaT:
+    client = anthropic_client(api_key)
+    # The schema goes as a plain output_config format rather than output_format:
+    # the SDK validates every text block against an output_format type on its
+    # own, and a web-searched answer is split across several blocks.
+    output_config: dict[str, Any] = {
+        "format": {"type": "json_schema", "schema": transform_schema(schema)}
+    }
+    request_kwargs: dict[str, Any] = {
+        "model": model.api_model,
+        "max_tokens": _anthropic_structured_output_budget(model),
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": _anthropic_content_blocks(user_content)}],
+        "output_config": output_config,
+    }
+    if web_search_enabled:
+        # allowed_callers direct-only, as in _stream_anthropic: the default
+        # includes programmatic tool calling, which Haiku rejects, and no
+        # structured caller runs code execution.
+        request_kwargs["tools"] = [
+            {
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "allowed_callers": ["direct"],
+            }
+        ]
+    # "none" and None both mean "send no effort parameter" — see
+    # ReasoningEffort in model_settings.py.
+    if reasoning_effort is not None and reasoning_effort != "none":
+        request_kwargs["thinking"] = {"type": "adaptive"}
+        output_config["effort"] = reasoning_effort
+
+    # Streamed: the SDK refuses a non-streaming request whose max_tokens could
+    # take more than ten minutes to write, which the budget above does.
+    # AnthropicError, not only APIError: a failed identity command or a refused
+    # token exchange (server-held credentials) is an SDK error with no HTTP status.
+    #
+    # A turn paused mid server-tool loop is resumed by sending the request
+    # again with the assistant's content so far; the answer is then read from
+    # the whole turn, whose content accumulates across the resumptions.
+    user_message = request_kwargs["messages"][0]
+    turn: list[ContentBlock] = []
+    for _ in range(1 + ANTHROPIC_PAUSE_CONTINUATIONS):
+        try:
+            async with client.messages.stream(**request_kwargs) as stream:
+                response = await stream.get_final_message()
+        except AnthropicError as e:
+            raise StructuredGenerationError(provider_error_detail(e) or str(e)) from e
+        turn.extend(response.content)
+        if response.stop_reason != "pause_turn":
+            break
+        request_kwargs["messages"] = [user_message, {"role": "assistant", "content": turn}]
+    else:
+        raise StructuredGenerationError(
+            f"The model paused its turn {1 + ANTHROPIC_PAUSE_CONTINUATIONS} times without "
+            "finishing its answer (its web searches ran too long)."
+        )
+
+    if response.stop_reason == "refusal":
+        raise StructuredGenerationError("The model declined to answer this request.")
+    if response.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+        raise StructuredGenerationError(
+            "The model reached its output limit before finishing its answer."
+        )
+    answer = _anthropic_final_answer(turn)
+    if not answer.strip():
+        raise StructuredGenerationError("The model returned no usable output.")
+    try:
+        parsed = schema.model_validate_json(answer)
+    except ValidationError as e:
+        raise StructuredGenerationError(
+            "The model's answer did not match the expected format."
+        ) from e
+
+    log_structured_response(caller, parsed)
+    return parsed
+
+
+async def parse_structured[SchemaT: BaseModel](
+    *,
+    caller: str,
+    model: ModelWindow,
+    api_key: str,
+    system_prompt: str,
+    user_content: str | list[dict],
+    schema: type[SchemaT],
+    reasoning_effort: str | None = None,
+    web_search_enabled: bool = False,
+) -> SchemaT:
+    """
+    One-shot structured-output call, shared by every non-streaming feature:
+    OpenAI's Responses API or Anthropic's Messages API, by model.provider.
+
+    Logs the prompt and the parsed response, and normalizes both failure modes
+    (provider error, output the schema could not be parsed from) to
+    StructuredGenerationError. user_content is either a plain string or
+    Responses-API content parts (input_text + input_file) when PDFs are
+    attached; the Anthropic branch converts those to Messages API blocks.
+    """
+    if model.provider == "openai":
+        return await _parse_structured_openai(
+            caller=caller,
+            model=model.api_model,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            schema=schema,
+            reasoning_effort=reasoning_effort,
+            web_search_enabled=web_search_enabled,
+        )
+    return await _parse_structured_anthropic(
+        caller=caller,
+        model=model,
+        api_key=api_key,
+        system_prompt=system_prompt,
+        user_content=user_content,
+        schema=schema,
+        reasoning_effort=reasoning_effort,
+        web_search_enabled=web_search_enabled,
+    )
 
 
 @dataclass
@@ -298,7 +531,7 @@ async def count_prompt_tokens(
     if model.provider == "openai":
         # tiktoken counting is CPU-bound — keep it off the event loop
         return await asyncio.to_thread(count_tokens, system_prompt + user_prompt, model.api_model)
-    client = AsyncAnthropic(api_key=api_key)
+    client = anthropic_client(api_key)
     return await _count_anthropic_tokens(client, model, system_prompt, user_prompt)
 
 
@@ -324,6 +557,8 @@ async def fit_to_context(
 
     A section trimmed to nothing is not an error: the prompt goes out at
     whatever size remains, and the provider rejects it if it still does not fit.
+    A count that fails (provider error, failed server-held credentials) raises
+    StructuredGenerationError with the provider's message.
 
     reserve_tokens must cover what the request carries beyond the counted
     prompt: the per-model instructions stream_text appends to the system
@@ -332,7 +567,10 @@ async def fit_to_context(
     """
 
     async def count(prompt: str) -> int:
-        return await count_prompt_tokens(model, api_key, system_prompt, prompt)
+        try:
+            return await count_prompt_tokens(model, api_key, system_prompt, prompt)
+        except AnthropicError as e:
+            raise StructuredGenerationError(provider_error_detail(e) or str(e)) from e
 
     available_tokens = model.max_input_tokens - reserve_tokens
 
@@ -583,7 +821,7 @@ async def _stream_anthropic(
     web_search_enabled: bool,
     verbosity: Literal["low", "medium"],
 ) -> AsyncGenerator[StreamChunk, None]:
-    client = AsyncAnthropic(api_key=api_key)
+    client = anthropic_client(api_key)
 
     if verbosity == "low":
         instructions += ANTHROPIC_CONCISE_INSTRUCTION

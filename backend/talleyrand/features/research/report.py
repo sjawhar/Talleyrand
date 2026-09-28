@@ -16,10 +16,11 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel
 
 from talleyrand.core.llm import parse_structured
-from talleyrand.core.model_settings import get_model_window
+from talleyrand.core.model_settings import ModelWindow
 from talleyrand.core.prompts import TALLEYRAND_DESCRIPTION
-from talleyrand.features.graph.dependencies import get_openai_api_key
+from talleyrand.features.graph.dependencies import get_background_api_key
 from talleyrand.features.graph.dtos import GraphNoId
+from talleyrand.features.research.background_models import background_model
 from talleyrand.features.research.context_builder import (
     build_question_tree,
     build_research_context,
@@ -27,9 +28,6 @@ from talleyrand.features.research.context_builder import (
 from talleyrand.features.research.context_fitting import fit_research_context
 from talleyrand.features.research.dtos import ReportRequestDTO, ReportResponseDTO
 from talleyrand.features.research.ref_tokens import outline_ref_tokens
-
-REPORT_MODEL = get_model_window("gpt-6-astra")
-REPORT_REASONING_EFFORT = "xhigh"
 
 INSTRUCTIONS = (
     TALLEYRAND_DESCRIPTION
@@ -70,7 +68,9 @@ class ReportSchema(BaseModel):
     markdown: str
 
 
-async def _build_report_user_content(graph: GraphNoId, guidance: str, openai_api_key: str) -> str:
+async def _build_report_user_content(
+    graph: GraphNoId, guidance: str, model: ModelWindow, api_key: str
+) -> str:
     """Overview context (brief, tree with answers + inline highlights, read order)
     plus the report-only DECLINED and consolidated HIGHLIGHTS sections. An optional
     user guidance line, when given, leads as the top-priority steering signal.
@@ -124,8 +124,8 @@ async def _build_report_user_content(graph: GraphNoId, guidance: str, openai_api
 
     context = await fit_research_context(
         build_research_context(graph, None),
-        model=REPORT_MODEL,
-        api_key=openai_api_key,
+        model=model,
+        api_key=api_key,
         system_prompt=INSTRUCTIONS,
         head="".join(f"{section}\n\n" for section in before),
         tail="".join(f"\n\n{section}" for section in after),
@@ -135,7 +135,7 @@ async def _build_report_user_content(graph: GraphNoId, guidance: str, openai_api
 
 async def generate_report(
     payload: ReportRequestDTO,
-    openai_api_key: Annotated[str, Depends(get_openai_api_key)],
+    api_key: Annotated[str, Depends(get_background_api_key)],
 ) -> ReportResponseDTO:
     """Generate a Markdown report summarizing the whole case."""
     graph = payload.graph
@@ -147,13 +147,16 @@ async def generate_report(
             detail="Answer at least one question before generating a report.",
         )
 
+    chosen = background_model("report")
     parsed = await parse_structured(
         caller="research_report",
-        model=REPORT_MODEL.api_model,
-        api_key=openai_api_key,
+        model=chosen.window,
+        api_key=api_key,
         system_prompt=INSTRUCTIONS,
-        user_content=await _build_report_user_content(graph, payload.guidance, openai_api_key),
+        user_content=await _build_report_user_content(
+            graph, payload.guidance, chosen.window, api_key
+        ),
         schema=ReportSchema,
-        reasoning_effort=REPORT_REASONING_EFFORT,
+        reasoning_effort=chosen.reasoning_effort,
     )
     return ReportResponseDTO(markdown=parsed.markdown.strip())

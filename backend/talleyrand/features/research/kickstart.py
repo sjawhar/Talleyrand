@@ -14,10 +14,11 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel
 
 from talleyrand.core.llm import fit_to_context, parse_structured
-from talleyrand.core.model_settings import get_model_window
+from talleyrand.core.model_settings import ModelWindow
 from talleyrand.core.prompts import TALLEYRAND_DESCRIPTION
-from talleyrand.features.graph.dependencies import get_openai_api_key
+from talleyrand.features.graph.dependencies import get_background_api_key
 from talleyrand.features.graph.dtos import DocumentDTO
+from talleyrand.features.research.background_models import background_model
 from talleyrand.features.research.context_builder import format_documents
 from talleyrand.features.research.dtos import (
     KickstartBriefRequestDTO,
@@ -27,8 +28,6 @@ from talleyrand.features.research.dtos import (
     KickstartQuestionsResponseDTO,
 )
 
-KICKSTART_MODEL = get_model_window("gpt-6-astra")
-KICKSTART_REASONING_EFFORT = "low"
 # Caps only the model's own proposals; the user's own questions extracted from
 # the notes are always returned in full, however many there are.
 MAX_INITIAL_QUESTIONS = 10
@@ -118,7 +117,12 @@ class KickstartQuestionsSchema(BaseModel):
 
 
 async def _user_content(
-    sections: list[str], documents: list[DocumentDTO], *, api_key: str, system_prompt: str
+    sections: list[str],
+    documents: list[DocumentDTO],
+    *,
+    model: ModelWindow,
+    api_key: str,
+    system_prompt: str,
 ) -> str | list[dict]:
     """
     Join prompt sections; inline txt documents, attach PDFs as file parts.
@@ -131,7 +135,7 @@ async def _user_content(
         attached = "\n".join(format_documents(documents, "", label="ATTACHED DOCUMENTS"))
         parts.append(
             await fit_to_context(
-                model=KICKSTART_MODEL,
+                model=model,
                 api_key=api_key,
                 system_prompt=system_prompt,
                 keep_before="\n\n".join(parts) + "\n\n",
@@ -139,7 +143,6 @@ async def _user_content(
                 keep_after="",
             )
         )
-
     text = "\n\n".join(parts)
     pdf_docs = [doc for doc in documents if doc.type == "pdf"]
     if not pdf_docs:
@@ -163,33 +166,35 @@ def _question_list_section(title: str, questions: list[str]) -> str:
 
 async def generate_brief(
     payload: KickstartBriefRequestDTO,
-    openai_api_key: Annotated[str, Depends(get_openai_api_key)],
+    api_key: Annotated[str, Depends(get_background_api_key)],
 ) -> KickstartBriefResponseDTO:
     """Generate the case brief from the user's kickoff notes."""
     notes = payload.input_text.strip()
     if not notes:
         raise HTTPException(status_code=400, detail="Kickoff notes are empty.")
 
+    chosen = background_model("kickstart_brief")
     parsed = await parse_structured(
         caller="research_kickstart_brief",
-        model=KICKSTART_MODEL.api_model,
-        api_key=openai_api_key,
+        model=chosen.window,
+        api_key=api_key,
         system_prompt=BRIEF_INSTRUCTIONS,
         user_content=await _user_content(
             [f"NOTES:\n{notes}"],
             payload.documents,
-            api_key=openai_api_key,
+            model=chosen.window,
+            api_key=api_key,
             system_prompt=BRIEF_INSTRUCTIONS,
         ),
         schema=KickstartBriefSchema,
-        reasoning_effort=KICKSTART_REASONING_EFFORT,
+        reasoning_effort=chosen.reasoning_effort,
     )
     return KickstartBriefResponseDTO(brief=parsed.brief.strip())
 
 
 async def generate_questions(
     payload: KickstartQuestionsRequestDTO,
-    openai_api_key: Annotated[str, Depends(get_openai_api_key)],
+    api_key: Annotated[str, Depends(get_background_api_key)],
 ) -> KickstartQuestionsResponseDTO:
     """Generate starting questions from the kickoff notes and list state."""
     notes = payload.input_text.strip()
@@ -223,17 +228,22 @@ async def generate_questions(
         "questions, and extract the user's own questions if the NOTES contain any."
     )
 
+    chosen = background_model("kickstart_questions")
     instructions = QUESTIONS_INSTRUCTIONS.format(max_questions=max_questions)
     parsed = await parse_structured(
         caller="research_kickstart_questions",
-        model=KICKSTART_MODEL.api_model,
-        api_key=openai_api_key,
+        model=chosen.window,
+        api_key=api_key,
         system_prompt=instructions,
         user_content=await _user_content(
-            sections, payload.documents, api_key=openai_api_key, system_prompt=instructions
+            sections,
+            payload.documents,
+            model=chosen.window,
+            api_key=api_key,
+            system_prompt=instructions,
         ),
         schema=KickstartQuestionsSchema,
-        reasoning_effort=KICKSTART_REASONING_EFFORT,
+        reasoning_effort=chosen.reasoning_effort,
         web_search_enabled=True,
     )
 

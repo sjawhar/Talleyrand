@@ -81,13 +81,13 @@ class AnswerParams:
 
 @dataclass
 class SuggestionParams:
-    openai_api_key: str
+    api_key: str
     request_more: bool
 
 
 @dataclass
 class CheatSheetParams:
-    openai_api_key: str
+    api_key: str
 
 
 @dataclass
@@ -362,11 +362,19 @@ class GenerationJobManager:
             # Started from the running answer (not from the queued one) so a
             # background burst can't run cheat sheets ahead of the answers.
             if params.cheat_sheet and has_thread_to_summarize(graph, node_id):
+                # Cheat sheets are a background feature, so the key follows
+                # settings.background_provider, not the answer's own model —
+                # the answer job always carries both keys the request brought.
+                background_key = (
+                    params.openai_api_key
+                    if settings.background_provider == "openai"
+                    else params.anthropic_api_key
+                )
                 await self.start_cheat_sheet_job(
                     graph_id=graph_id,
                     user_id=record.user_id,
                     node_id=node_id,
-                    params=CheatSheetParams(openai_api_key=params.openai_api_key),
+                    params=CheatSheetParams(api_key=background_key),
                 )
 
             # The model writes cross-links as outline numbers against the tree
@@ -523,13 +531,13 @@ class GenerationJobManager:
                     if r.kind == "answer" and r.status == "error" and r.node_id is not None
                 }
                 placed = await get_big_picture_suggestions(
-                    graph, params.openai_api_key, failed_node_ids=failed_node_ids
+                    graph, params.api_key, failed_node_ids=failed_node_ids
                 )
                 questions = [(str(q.parent_node_id), q.question) for q in placed]
                 cap, big_picture = BIG_PICTURE_CAP, True
             else:
                 parsed = await get_research_suggestions(
-                    graph, UUID(record.node_id or ""), params.request_more, params.openai_api_key
+                    graph, UUID(record.node_id or ""), params.request_more, params.api_key
                 )
                 questions = [(record.node_id or "", text) for text in parsed.questions]
                 cap, big_picture = FOLLOWUP_CAP, False
@@ -622,9 +630,7 @@ class GenerationJobManager:
                 )
                 return
 
-            markdown = await generate_cheat_sheet(
-                graph, record.node_id or "", params.openai_api_key
-            )
+            markdown = await generate_cheat_sheet(graph, record.node_id or "", params.api_key)
             # The model cites source questions by outline number against the
             # tree it was shown; persist them as node ids, like answers, so
             # later tree edits can't silently re-target a link.

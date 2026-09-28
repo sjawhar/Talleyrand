@@ -26,3 +26,20 @@ os.environ["GOOGLE_REDIRECT_URI"] = "http://localhost:8000/auth/google/callback"
 # oauth_state cookie is then no longer Secure, the test client starts replaying
 # it, and the tests that must send no cookie quietly send one.
 os.environ["COOKIE_SECURE"] = "true"
+
+# The instance settings a developer's own environment or .env may carry, pinned to their
+# defaults: otherwise the suite runs in local mode, sends background features to Claude,
+# and makes real token exchanges through the configured identity token command. An empty
+# value counts as unset and, unlike a removed variable, also overrides a .env file.
+os.environ["BACKGROUND_PROVIDER"] = "openai"
+os.environ["DICTATION_ENABLED"] = "true"
+for _name in (
+    "ANTHROPIC_IDENTITY_TOKEN_COMMAND",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_WORKSPACE_ID",
+    "LOCAL_USER_EMAIL",
+    "LOCAL_USER_NAME",
+):
+    os.environ[_name] = ""

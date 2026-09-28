@@ -104,6 +104,10 @@ class GenerationJobRepository:
     async def insert(self, record: GenerationJobRecord) -> None:
         await self.collection.insert_one(self._to_doc(record))
 
+    async def get(self, job_id: str) -> GenerationJobRecord | None:
+        doc = await self.collection.find_one({"_id": job_id})
+        return None if doc is None else self._from_doc(doc)
+
     async def get_for_graph(self, graph_id: str) -> list[GenerationJobRecord]:
         cursor = self.collection.find({"graphId": graph_id})
         return [self._from_doc(doc) async for doc in cursor]

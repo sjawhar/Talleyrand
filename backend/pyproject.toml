@@ -32,6 +32,7 @@ start = "uvicorn talleyrand.main:app --host 0.0.0.0 --port 8000"
 lint = "ruff check ."
 format = "ruff format ."
 test = "pytest --show-capture=all"
+tally = { call = "talleyrand.cli:main" }
 post_install = "bash -c 'command -v pre-commit && pre-commit install || true'"
 
 [tool.ruff]

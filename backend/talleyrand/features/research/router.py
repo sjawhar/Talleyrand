@@ -65,6 +65,13 @@ router.add_api_route(
     dependencies=[Depends(limit_suggestions)],
 )
 
+# One job's record over HTTP, for callers that poll instead of streaming.
+router.add_api_route(
+    "/{graph_id}/jobs/{job_id}",
+    generation.get_job,
+    methods=["GET"],
+)
+
 # The composer's context meter: what the next question would send, counted
 # by the tokenizer that will judge it.
 router.add_api_route(

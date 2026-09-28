@@ -150,6 +150,25 @@ async def suggest_big_picture(
     return to_job_dto(record, manager.live_job_ids())
 
 
+async def get_job(
+    graph_id: UUID,
+    job_id: UUID,
+    graph_repo: Annotated[GraphDataRepository, Depends(get_graph_repo)],
+    job_repo: Annotated[GenerationJobRepository, Depends(get_job_repo)],
+    user: Annotated[User, Depends(auth_app.require_auth)],
+) -> JobDTO:
+    """
+    One job's record, for a caller that polls over HTTP rather than holding the
+    stream open. A record retires once the case has taken in its result, so a
+    404 for a job that finished means: read the case.
+    """
+    await _require_graph(graph_repo, user.email, str(graph_id))
+    record = await job_repo.get(str(job_id))
+    if record is None or record.graph_id != str(graph_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return to_job_dto(record, manager.live_job_ids())
+
+
 async def create_stream_ticket(
     graph_id: UUID,
     graph_repo: Annotated[GraphDataRepository, Depends(get_graph_repo)],

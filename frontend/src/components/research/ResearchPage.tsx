@@ -8,12 +8,14 @@ import {
   resolveQuestionUrlId,
 } from '../../routes/paths';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { shouldAutoOpenSettings } from '../../client';
 import { SettingsModal } from '../SettingsModal';
 import { Sidebar } from '../Sidebar';
 import { createNewGraph } from '../../services/autosaveService';
 import { CASE_DELETED_EVENT, CASE_SAVE_CONFLICT_EVENT } from '../../services/autosaveSubscriptions';
 import { researchGenerationService } from '../../services/researchGenerationService';
 import { useDocumentTitle } from '../../hooks/useDocumentTitle';
+import { useConfigStore } from '../../stores/configStore';
 import { useGraphStructureStore } from '../../stores/graphStructureStore';
 import { useResearchStore } from '../../stores/researchStore';
 import { useUIStateStore } from '../../stores/uiStateStore';
@@ -62,6 +64,8 @@ export const ResearchPage: FC = () => {
   const showSettingsModal = useUIStateStore(s => s.showSettingsModal);
   const setShowSettingsModal = useUIStateStore(s => s.setShowSettingsModal);
   const isLoadingGraph = useUIStateStore(s => s.isLoadingGraph);
+  const configLoading = useConfigStore(s => s.isLoading);
+  const backgroundProvider = useConfigStore(s => s.config?.backgroundProvider ?? 'openai');
 
   // Job state is part of what the page renders: gate on it like on the graph
   // itself, so questions generating server-side never flash as "never asked".
@@ -101,13 +105,15 @@ export const ResearchPage: FC = () => {
     return () => window.removeEventListener(CASE_DELETED_EVENT, handleDeleted);
   }, [graphId, navigate]);
 
+  // API-key gate: opens Settings when the background provider has no key
+  // (see shouldAutoOpenSettings).
   useEffect(() => {
-    // API-key gate: suggestions, kickstarts and reports all run on OpenAI,
-    // so the app is unusable without that key specifically
-    if (!localStorage.getItem('openai_api_key')) {
+    if (shouldAutoOpenSettings(configLoading, backgroundProvider)) {
       setShowSettingsModal(true);
     }
+  }, [graphId, reloadKey, configLoading, backgroundProvider]);
 
+  useEffect(() => {
     // The graph selector is "usually hidden" in the research view
     setShowSidebar(false);
 

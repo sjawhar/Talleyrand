@@ -7,6 +7,13 @@ export const PROVIDER_LABELS: Record<ModelProvider, string> = {
   anthropic: 'Claude',
 };
 
+// Matches the "OpenAI API key" / "Anthropic API key" field labels in
+// Settings, so a picker pointing someone at the fix names the same thing.
+export const PROVIDER_KEY_LABELS: Record<ModelProvider, string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+};
+
 // Within each provider, models are ordered from fastest to deepest reasoning —
 // the picker's thinking slider maps positions onto this order.
 // inputTokens mirrors the backend's ModelWindow.max_input_tokens (model_settings.py):
@@ -150,4 +157,18 @@ export function modelProvider(modelId: string | undefined | null): ModelProvider
 /** Whether a stored id names a model that has since been retired. */
 export function isRetiredModel(modelId: string | undefined | null): boolean {
   return !!modelId && modelId in RETIRED_MODELS;
+}
+
+/**
+ * The model of `provider` at the same thinking position as `modelId`: the
+ * same index in that provider's fastest-to-deepest list above, clamped to
+ * its deepest model. Preserves the depth someone chose when their model has
+ * to change provider (GPT-6 Astra high → Claude Fable 5.1 high) — the same
+ * position the picker keeps when switching providers by hand.
+ */
+export function sameTierModel(modelId: ModelType, provider: ModelProvider): ModelType {
+  const own = MODELS.find(m => m.id === modelId)!;
+  const position = MODELS.filter(m => m.provider === own.provider).indexOf(own);
+  const ladder = MODELS.filter(m => m.provider === provider);
+  return ladder[Math.min(position, ladder.length - 1)].id;
 }

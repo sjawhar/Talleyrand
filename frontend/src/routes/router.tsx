@@ -16,6 +16,27 @@ import { UnauthorizedEvent } from '../events/UnauthorizedEvent';
 import { clearTokens } from '../services/tokenStorage';
 import { registerRouter } from './caseNavigation';
 import { SITE_URL } from '../config/constants';
+import { resolveUsableModel } from '../client';
+import { useConfigStore } from '../stores/configStore';
+import { useResearchStore } from '../stores/researchStore';
+
+// Kicks off the one config fetch for the whole app, as early as possible —
+// before the login decision LoginPage and ProtectedRoute make from it. Once
+// it lands, also re-check the stored default model: it was picked (or
+// defaulted) before the app knew which providers the server holds keys for,
+// so a model that turns out unusable is swapped for one that isn't.
+const ConfigLoader: FC = () => {
+  useEffect(() => {
+    useConfigStore
+      .getState()
+      .fetchConfig()
+      .then(() => {
+        const { defaultModel, setDefaultModel } = useResearchStore.getState();
+        setDefaultModel(resolveUsableModel(defaultModel));
+      });
+  }, []);
+  return null;
+};
 
 // Component to handle auth events
 const AuthEventHandler: FC = () => {
@@ -80,6 +101,7 @@ const CanonicalLink: FC = () => {
 
 const RootLayout: FC = () => (
   <AuthProvider>
+    <ConfigLoader />
     <AuthEventHandler />
     <CanonicalLink />
     <Outlet />

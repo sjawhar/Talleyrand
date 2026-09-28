@@ -3,9 +3,11 @@ import ReactDOM from 'react-dom';
 import { type ModelType, MODELS, resolveModelId } from '../config/models';
 import { ModelPicker } from './ui/ModelPicker';
 import { useResearchStore } from '../stores/researchStore';
+import { useConfigStore } from '../stores/configStore';
 import { iconTooltip } from './ui/TooltipLayer';
 import { AuthService } from '../services/authService';
 import { saveNow } from '../services/autosaveSubscriptions';
+import { isProviderKeyRequired } from '../client';
 import { useAuth } from '../contexts/AuthContext';
 import { getConsent, isAnalyticsConfigured, setConsent } from '../services/analyticsConsent';
 
@@ -37,14 +39,27 @@ const SelectChevron: FC = () => (
 
 const ApiKeyField: FC<{
   label: string;
-  required?: boolean;
-  hint: string;
+  required: boolean;
+  /** The family of models this key unlocks, as the hint names it. */
+  models: string;
   href: string;
   hrefLabel: string;
   placeholder: string;
   value: string;
   onChange: (value: string) => void;
-}> = ({ label, required = false, hint, href, hrefLabel, placeholder, value, onChange }) => {
+  /** Set when the server holds its own credentials for this provider: its name. */
+  serverProvider?: string;
+}> = ({
+  label,
+  required,
+  models,
+  href,
+  hrefLabel,
+  placeholder,
+  value,
+  onChange,
+  serverProvider,
+}) => {
   const [showKey, setShowKey] = useState(false);
   return (
     <div>
@@ -109,7 +124,18 @@ const ApiKeyField: FC<{
           )}
         </button>
       </div>
-      <p className="mt-1 text-[11px] leading-relaxed text-stone-400">{hint}</p>
+      {serverProvider ? (
+        <p className="mt-1 text-[11px] leading-relaxed text-emerald-700">
+          This instance reaches {serverProvider} with its own credentials; a key here is optional
+          and takes precedence.
+        </p>
+      ) : (
+        <p className="mt-1 text-[11px] leading-relaxed text-stone-400">
+          {required
+            ? "Powers questions, suggestions, and reports — the app doesn't work without it."
+            : `Only needed if you want answers from ${models} models.`}
+        </p>
+      )}
     </div>
   );
 };
@@ -158,6 +184,8 @@ const ToggleRow: FC<{
 
 export const SettingsModal: FC<SettingsModalProps> = ({ isOpen, onClose, onSave }) => {
   const { user } = useAuth();
+  // Subscribed so the key fields follow /config.
+  const config = useConfigStore(s => s.config);
   // Initialize state directly from localStorage
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
   const [anthropicApiKey, setAnthropicApiKey] = useState(
@@ -282,23 +310,26 @@ export const SettingsModal: FC<SettingsModalProps> = ({ isOpen, onClose, onSave 
             <div className="mb-4">
               <ApiKeyField
                 label="OpenAI API key"
-                required
-                hint="Powers questions, suggestions, and reports — the app doesn't work without it."
+                required={isProviderKeyRequired('openai')}
+                models="GPT"
                 href="https://platform.openai.com/api-keys"
                 hrefLabel="Get a key from OpenAI"
                 placeholder="sk-…"
                 value={apiKey}
                 onChange={setApiKey}
+                serverProvider={config?.providers.openai ? 'OpenAI' : undefined}
               />
             </div>
             <ApiKeyField
               label="Anthropic API key"
-              hint="Only needed if you want answers from Claude models."
+              required={isProviderKeyRequired('anthropic')}
+              models="Claude"
               href="https://console.anthropic.com/settings/keys"
               hrefLabel="Get a key from Anthropic"
               placeholder="sk-ant-…"
               value={anthropicApiKey}
               onChange={setAnthropicApiKey}
+              serverProvider={config?.providers.anthropic ? 'Anthropic' : undefined}
             />
             <p className="mt-1.5 text-[11px] leading-relaxed text-stone-400">
               Keys are stored locally in this browser and sent to our server only to make model

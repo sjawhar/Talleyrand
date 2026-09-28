@@ -1,7 +1,9 @@
 import { FC, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { isProviderOffered, resolveUsableModel } from '../../client';
 import {
   MODELS,
+  PROVIDER_KEY_LABELS,
   PROVIDER_LABELS,
   PROVIDERS,
   type ModelProvider,
@@ -67,6 +69,19 @@ export const ModelPicker: FC<ModelPickerProps> = ({
     }
   }, [allowedModels, selectedModel, allowed, onModelChange]);
 
+  // Fall back to an offered model when the selected one's provider is
+  // withheld (the server holds credentials for another provider and this
+  // device has no key for it), so the picker never lands on a provider that
+  // can only fail. resolveUsableModel keeps the thinking position across
+  // providers. Effect (not render) because it changes caller state via
+  // onModelChange.
+  useEffect(() => {
+    const fallback = resolveUsableModel(selectedModel);
+    if (fallback !== selectedModel && allowed.some(m => m.id === fallback)) {
+      onModelChange(fallback);
+    }
+  }, [allowed, selectedModel, onModelChange]);
+
   // The tooltip renders in a portal with fixed positioning so it is never
   // clipped by overflow-hidden popovers, modals, or scroll containers.
   useLayoutEffect(() => {
@@ -104,22 +119,29 @@ export const ModelPicker: FC<ModelPickerProps> = ({
   return (
     <div className="flex items-center gap-2">
       <div className="flex overflow-hidden rounded-md border border-stone-300 bg-white shadow-sm">
-        {availableProviders.map(p => (
-          <button
-            key={p}
-            type="button"
-            onClick={() => switchProvider(p)}
-            disabled={disabled}
-            data-tooltip={`Use ${PROVIDER_LABELS[p]} models`}
-            className={`px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed ${
-              p === provider
-                ? 'bg-stone-800 text-stone-50'
-                : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'
-            }`}
-          >
-            {PROVIDER_LABELS[p]}
-          </button>
-        ))}
+        {availableProviders.map(p => {
+          const offered = isProviderOffered(p);
+          return (
+            <button
+              key={p}
+              type="button"
+              onClick={() => offered && switchProvider(p)}
+              disabled={disabled || !offered}
+              data-tooltip={
+                offered
+                  ? `Use ${PROVIDER_LABELS[p]} models`
+                  : `Add ${PROVIDER_KEY_LABELS[p]} API key in Settings to use ${PROVIDER_LABELS[p]} models`
+              }
+              className={`px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                p === provider
+                  ? 'bg-stone-800 text-stone-50'
+                  : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'
+              }`}
+            >
+              {PROVIDER_LABELS[p]}
+            </button>
+          );
+        })}
       </div>
       <div
         className="relative flex w-32 items-center py-1"

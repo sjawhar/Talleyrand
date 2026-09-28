@@ -4,6 +4,7 @@ import { isProviderKeyConfigured } from '../../client';
 import { useNodeContentStore } from '../../stores/nodeContentStore';
 import { useResearchStore } from '../../stores/researchStore';
 import { useUIStateStore } from '../../stores/uiStateStore';
+import { useConfigStore } from '../../stores/configStore';
 import { nodeDocumentBytes } from '../../utils/documentBudget';
 import { insertNewline } from '../../utils/insertNewline';
 import {
@@ -410,10 +411,12 @@ export const KickstartModal: FC<KickstartModalProps> = ({ onClose }) => {
   const applyKickstart = useResearchStore(s => s.applyKickstart);
   const settingsOpen = useUIStateStore(s => s.showSettingsModal);
   const setShowSettingsModal = useUIStateStore(s => s.setShowSettingsModal);
-  // Both generations run on OpenAI, so without that key neither can succeed:
-  // adding it — not retrying — is the way out of the error. Re-read whenever
-  // the settings modal opens or closes, so a key added there is seen at once.
-  const needsApiKey = !settingsOpen && !isProviderKeyConfigured('openai');
+  // Both generations run on the server's configured background provider, so
+  // without that key neither can succeed: adding it — not retrying — is the
+  // way out of the error. Re-read whenever the settings modal opens or
+  // closes, so a key added there is seen at once.
+  const backgroundProvider = useConfigStore(s => s.config?.backgroundProvider ?? 'openai');
+  const needsApiKey = !settingsOpen && !isProviderKeyConfigured(backgroundProvider);
 
   const [notes, setNotes] = useState('');
 

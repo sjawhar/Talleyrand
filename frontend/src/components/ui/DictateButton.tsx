@@ -1,5 +1,6 @@
 import { FC, useEffect, useRef } from 'react';
 import { useDictation } from '../../hooks/useDictation';
+import { useConfigStore } from '../../stores/configStore';
 
 const MicIcon: FC<{ className?: string }> = ({ className = 'h-4 w-4' }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -58,11 +59,12 @@ interface DictateButtonProps {
 
 /**
  * Microphone button that records speech and hands back the transcript via
- * `onTranscript`. Renders nothing when the browser can't record. Cycles
- * Dictate → Recording… → Transcribing…; while recording it shows how long is
- * left before the auto-stop limit and stays clickable so the user can stop
- * even if `disabled` flips true. When a transcription fails, a Retry button
- * appears alongside so the kept recording can be re-sent.
+ * `onTranscript`. Renders nothing when the browser can't record, or when the
+ * server config reports dictation disabled (no transcription credentials).
+ * Cycles Dictate → Recording… → Transcribing…; while recording it shows how
+ * long is left before the auto-stop limit and stays clickable so the user
+ * can stop even if `disabled` flips true. When a transcription fails, a
+ * Retry button appears alongside so the kept recording can be re-sent.
  */
 export const DictateButton: FC<DictateButtonProps> = ({
   onTranscript,
@@ -79,7 +81,9 @@ export const DictateButton: FC<DictateButtonProps> = ({
     onErrorRef.current?.(dictation.error);
   }, [dictation.error]);
 
-  if (!dictation.isSupported) return null;
+  const dictationEnabled = useConfigStore(s => s.config?.dictation ?? true);
+
+  if (!dictationEnabled || !dictation.isSupported) return null;
 
   return (
     <>

@@ -10,7 +10,7 @@ import type {
   TextSelection,
 } from '../types';
 import { resolveModelId } from '../config/models';
-import { isParentSummaryEnabled } from '../client';
+import { isParentSummaryEnabled, resolveUsableModel } from '../client';
 import { useGraphStructureStore, generateEdgeId, type GraphNode } from './graphStructureStore';
 import { useNodeContentStore } from './nodeContentStore';
 import { buildQuestionTree, ancestorsOf, descendantsOf } from '../utils/questionTree';
@@ -474,7 +474,10 @@ export const useResearchStore = create<ResearchStore>()(
           id: newNodeId,
           query,
           response: '',
-          selectedModel: get().defaultModel,
+          // Falls back to a usable model if the stored default's provider has
+          // no key — on this device or the server — so a new question never
+          // starts from a model that can only fail.
+          selectedModel: resolveUsableModel(get().defaultModel),
           parentSelectedText: selection?.text,
           parentSelectedPrefix: selection?.prefix,
           parentSelectedSuffix: selection?.suffix,
